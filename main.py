@@ -9,12 +9,49 @@ from readability import Document
 from dotenv import load_dotenv
 from typing import Optional
 from openai import OpenAI
+import mimetypes, tempfile, uuid
+from urllib.parse import urljoin, urlparse
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def resolve_absolute_url(base_url: str, relative_url: str) -> str:
+    """
+    Resolve a relative URL to an absolute URL.
+    """
+    return relative_url if bool(urlparse(relative_url).netloc) else urljoin(base_url, relative_url)
+
+def get_cover_url(base_url: str, html: str, item_id: str) -> Optional[str]:
+    """
+    Extract the cover URL from the HTML.
+    """
+    soup = bs4.BeautifulSoup(html, "lxml")
+
+    for attr in ["property", "name"]:
+        tag = soup.find("meta", {attr: ["og:image", "twitter:image"]})
+        if tag and tag.get("content"):
+            return resolve_absolute_url(base_url, tag["content"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        from playwright.sync_api import sync_playwright
+        tmp_path = f"{tmp}/{uuid.uuid4()}.jpg"
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(viewport={"width": 1200, "height": 630})
+            page.goto(base_url, timeout=20000)
+            page.screenshot(path=tmp_path, full_page=False, quality=85, type="jpeg")
+            browser.close()
+
+        bucket = supabase.storage.from_("items-assets")
+        file_key = f"{item_id}/cover.jpg"
+        bucket.upload(file_key, open(tmp_path, "rb"), upsert=True,
+                      content_type=mimetypes.guess_type(tmp_path)[0])
+
+        signed = bucket.create_signed_url(file_key, 60*60*24*7).get("signedUrl")
+        return signed
 
 def process_url(item_id: str, url: str):
     """
@@ -25,6 +62,7 @@ def process_url(item_id: str, url: str):
     try:
         html = httpx.get(url, timeout=20).text
 
+        cover_url = get_cover_url(url, html, item_id)
         article_html = Document(html).summary()
         text = bs4.BeautifulSoup(article_html, "lxml").get_text(" ", strip=True)
 
@@ -54,6 +92,7 @@ def process_url(item_id: str, url: str):
             "description": meta["description"],
             "tags": meta["tags"],
             "embedding": embedding,
+            "cover_url": cover_url,
         }).eq("id", item_id).execute()
     except Exception as e:
         logging.error(f"Procesando {url}: {e}")
