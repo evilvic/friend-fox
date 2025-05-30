@@ -159,6 +159,37 @@ async def ingest(
     background_tasks.add_task(process_url, item["id"], str(request.url))
     return {"status": "queued", "item": item}
 
+@app.get("/search")
+async def search(
+    query: str,
+    limit: int = 20,
+    authorization: Optional[str] = Header(default=None),
+):
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    jwt = authorization.split(" ", 1)[1]
+
+    user_response = supabase.auth.get_user(jwt)
+    user = user_response.user
+    if user is None:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    user_id = user.id
+
+    embedding_response = openai.embeddings.create(
+        model="text-embedding-3-small",
+        input=query
+    )
+    embedding = embedding_response.data[0].embedding
+
+    res = supabase.rpc("search_items", {
+        "match_count": limit,
+        "q": query,
+        "query_embedding": embedding,
+        "p_user_id": user_id
+    }).execute()
+    return res.data
+
 @app.get("/")
 async def main():
     return {"message": "The fox said, 'It is only with the heart that one can see rightly; what is essential is invisible to the eye.'"}
