@@ -11,6 +11,7 @@ from typing import Optional
 from openai import OpenAI
 import mimetypes, tempfile, uuid
 from urllib.parse import urljoin, urlparse
+import time
 
 load_dotenv()
 
@@ -23,6 +24,25 @@ def resolve_absolute_url(base_url: str, relative_url: str) -> str:
     Resolve a relative URL to an absolute URL.
     """
     return relative_url if bool(urlparse(relative_url).netloc) else urljoin(base_url, relative_url)
+
+def safe_get(url: str, timeout=60, retries=3) -> Optional[str]:
+    headers = {"User-Agent": "Mozilla/5.0 (friend-fox bot) Gecko/2025-05-30"}
+    for attempt in range(retries):
+        try:
+            with httpx.Client(timeout=timeout, headers=headers) as c:
+                r = c.get(url)
+                if r.status_code == 403:
+                    logging.warning(f"403 Forbidden for {url}, skipping HTML download.")
+                    return ""
+                r.raise_for_status()
+                return r.text
+        except httpx.RequestError as e:
+            logging.warning(f"Network error {url}: {e}, retry {attempt+1}/{retries}")
+            time.sleep(2 * (attempt + 1))
+        except httpx.HTTPStatusError as e:
+            logging.warning(f"Bad status {url}: {e.response.status_code}, retry {attempt+1}/{retries}")
+            time.sleep(2 * (attempt + 1))
+    return None
 
 def get_cover_url(base_url: str, html: str, item_id: str) -> Optional[str]:
     """
@@ -47,8 +67,15 @@ def get_cover_url(base_url: str, html: str, item_id: str) -> Optional[str]:
 
         bucket = supabase.storage.from_("items-assets")
         file_key = f"{item_id}/cover.jpg"
-        bucket.upload(file_key, open(tmp_path, "rb"), upsert=True,
-                      content_type=mimetypes.guess_type(tmp_path)[0])
+        mime = mimetypes.guess_type(tmp_path)[0]
+        bucket.upload(
+            file_key,
+            open(tmp_path, "rb"),
+            file_options={
+                "content-type": mime,
+                "upsert": True
+            }
+        )
 
         signed = bucket.create_signed_url(file_key, 60*60*24*7).get("signedUrl")
         return signed
@@ -60,9 +87,13 @@ def process_url(item_id: str, url: str):
     Finally, update the item in the database.
     """
     try:
-        html = httpx.get(url, timeout=20).text
-
-        cover_url = get_cover_url(url, html, item_id)
+        html = safe_get(url)
+        cover_url = get_cover_url(url, html if html else "", item_id)
+        if not html:
+            supabase.table("items").update({
+                "cover_url": cover_url
+            }).eq("id", item_id).execute()
+            return
         article_html = Document(html).summary()
         text = bs4.BeautifulSoup(article_html, "lxml").get_text(" ", strip=True)
 
