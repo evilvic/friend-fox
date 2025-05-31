@@ -27,6 +27,7 @@ def resolve_absolute_url(base_url: str, relative_url: str) -> str:
 
 def safe_get(url: str, timeout=60, retries=3) -> Optional[str]:
     headers = {"User-Agent": "Mozilla/5.0 (friend-fox bot) Gecko/2025-05-30"}
+    logging.info(f"Headers: {headers}")
     for attempt in range(retries):
         try:
             with httpx.Client(timeout=timeout, headers=headers) as c:
@@ -68,12 +69,13 @@ def get_cover_url(base_url: str, html: str, item_id: str) -> Optional[str]:
         bucket = supabase.storage.from_("items-assets")
         file_key = f"{item_id}/cover.jpg"
         mime = mimetypes.guess_type(tmp_path)[0]
+        logging.info(f"mime: {mime}")
         bucket.upload(
             file_key,
             open(tmp_path, "rb"),
             file_options={
-                "content-type": mime,
-                "upsert": True
+                "content_type": mime or "image/jpeg",
+                "upsert": "true"
             }
         )
 
@@ -145,7 +147,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
